@@ -6,6 +6,7 @@ import h5py
 import os
 import pickle
 import  re
+import ipdb
 
 basic_atom_data = h5py.File(os.path.join(os.path.dirname(__file__), 'data', 'atom_data_basic.h5'))['basic_atom_data']
 symbol2z = dict(zip(basic_atom_data['symbol'], basic_atom_data['atomic_number']))
@@ -44,8 +45,8 @@ class TopBaseData:
         if key in level_dic['level_index']:
             return level_dic['level_index'][key]
         else:
-            index = level_dic['max'] +1
-            level_dic['max']= index
+            index = level_dic['max']
+            level_dic['max']= index +1
             level_dic['level_index'][key] = index
             self.index_dict[atom][ion]['level_index'][key] = index
             return index
@@ -196,6 +197,7 @@ class TopBaseData:
                         Eion = units.Unit('Ry').to('eV',np.float64(splitt_data[5]))
                         number = splitt_data[6]
                         i = 0
+                        first_line = True
                         print(splitt_data)
                     elif c_pattern_value.match(data):
                         i+=1
@@ -207,9 +209,10 @@ class TopBaseData:
                         _tmp = [I,nz,ne,ISLP,ILV,Eion,number,Ecx,cx]
                         c_datalist.append(_tmp)
 
-                        if i ==1:
+                        if i == first_line:
+                            print(_tmp)
                             c_datathlist.append(_tmp)
-
+                            first_line = False
 
             length = len(c_datalist)
             c_dataarray = np.recarray((length,),dtype=[('i', int),('atomic_number', int), ('ion_number',int), ('level_number', int), ('iSLP', int), ('iLV', int),
@@ -236,7 +239,7 @@ class TopBaseData:
                 c_datatharray[i]['ion_number'] = int(data[2])
                 c_datatharray[i]['iSLP'] = int(data[3])
                 c_datatharray[i]['iLV'] = int(data[4])
-                c_dataarray[i]['level_number'] = self._get_level_index(int(data[1]),int(data[2]),int(data[3]),int(data[4]))#int('%d%d'%(c_datatharray[i]['iSLP'],c_datatharray[i]['iLV']))
+                c_datatharray[i]['level_number'] = self._get_level_index(int(data[1]),int(data[2]),int(data[3]),int(data[4]))#int('%d%d'%(c_datatharray[i]['iSLP'],c_datatharray[i]['iLV']))
                 c_datatharray[i]['Eion'] = np.float64(data[5])
                 c_datatharray[i]['number'] = int(data[6])
                 c_datatharray[i]['Ecx'] = np.float64(data[7])
@@ -365,6 +368,8 @@ def insert_one_species_to_db(symbol, ion_number, conn, topbasedatastore, tempera
     curs = conn.cursor()
     curs.execute('delete from levels where atom=? and ion=?', (atomic_number, ion_number - 1 ))
     curs.execute('delete from lines where atom=? and ion=?', (atomic_number, ion_number  - 1))
+    curs.execute('delete from cx_data where atom=? and ion=?', (atomic_number, ion_number  - 1))
+    curs.execute('delete from cx_sp_data where atom=? and ion=?', (atomic_number, ion_number  - 1))
 
     #collision_data_cols = curs.execute('pragma table_info(collision_data)').fetchall()
 
@@ -396,36 +401,21 @@ def insert_one_species_to_db(symbol, ion_number, conn, topbasedatastore, tempera
 
     for key, level in levels_data.iterrows():
         count_down = curs.execute('select count(id) from lines where atom=? and ion=? and level_id_upper=?',
-                     (atomic_number, ion_number - 1, int(key-1))).fetchone()[0]
+                     (atomic_number, ion_number - 1, int(key))).fetchone()[0]
 
         curs.execute('insert into levels(atom, ion, energy, g, level_id, metastable) values(?, ?, ?, ?, ?, ?)',
-                     (atomic_number, ion_number-1, level['energy'], level['g'], int(key-1), count_down == 0))
+                     (atomic_number, ion_number-1, level['energy'], level['g'], int(key), count_down == 0))
 
 
-    photocx_data_tabel_stmt = r"create table cx_data(id integer primary key," \
-                              r"atom integer," \
-                              r"ion integer," \
-                              r"level_number integer," \
-                              r"cross_section float)"
-
-    photocxsp_data_tabel_stmt = r"create table cx_sp_data(id integer primary key," \
-                              r"atom integer," \
-                              r"ion integer," \
-                              r"level_number integer," \
-                              r"nu float," \
-                              r"cross_section float)"
-
-    curs.execute(photocx_data_tabel_stmt)
-    curs.execute(photocxsp_data_tabel_stmt)
 
 
-    for data in cx_data:
+    for data in cx_datath:
         curs.execute('insert into cx_data(atom, ion, level_number, cross_section)values(?,?,?,?)',
                      (data['atomic_number'], data['ion_number'] - 1, data['level_number'], data['cx']))
 
-    for data in cx_datath:
-        curs.execute('insert into cx_sp_data(atom, ion, level_number, nu ,cross_section) values(?,?,?,?,?)',
-                     (data['atomic_number'], data['ion_number'] - 1, data['level_number'],data['nu'] , data['cx']))
+    for data in cx_data:
+        curs.execute('insert into cx_sp_breadata(atom, ion, level_number, nu ,cross_section) values(?,?,?,?,?)',
+                     (data['atomic_number'], data['ion_number'] - 1, data['level_number'], data['nu'] , data['cx']))
 
     conn.commit()
 
@@ -437,6 +427,26 @@ def insert_to_db(species,conn, fvalue_fname, level_fname, photocx_fname, tempera
     topbasedatastore.read_fvalues(fvalue_fname)
     topbasedatastore.read_photoionization_cross_section(photocx_fname)
 
+    curs = conn.cursor()
+
+
+    photocx_data_tabel_stmt = r"create table cx_data(id integer primary key," \
+                              r"atom integer," \
+                              r"ion integer," \
+                              r"level_number integer," \
+                              r"cross_section float)"
+
+    photocxsp_data_tabel_stmt = r"create table cx_sp_data(id integer primary key," \
+                                r"atom integer," \
+                                r"ion integer," \
+                                r"level_number integer," \
+                                r"nu float," \
+                                r"cross_section float)"
+
+    curs.execute(photocx_data_tabel_stmt)
+    curs.execute(photocxsp_data_tabel_stmt)
+    curs.close()
+    conn.commit()
     for species in species:
         print("Inserting %s %s to database" % (str(species[0]), str(species[1])))
         insert_one_species_to_db(species[0],species[1],conn ,topbasedatastore, temperatures)
