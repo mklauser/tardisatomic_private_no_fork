@@ -210,7 +210,7 @@ def insert_to_db(symbol, ion_number, conn, temperatures=None):
 
 
 
-def create_collision_data_table(conn, temperatures=np.arange(2000, 50000, 2000)):
+def create_collision_data_table(conn, temperatures=np.linespace(2000, 48000, 24)):
 
     curs = conn.cursor()
 
