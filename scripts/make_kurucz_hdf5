@@ -167,9 +167,9 @@ if atom_filter_stmt != '':
 if where_stmt != []:
     levels_sql_stmt += ' where %s' % ' and '.join(where_stmt)
 
-
-
 levels_sql_stmt += ' ORDER BY atom,ion, level_id'
+
+
 
 
 
@@ -342,7 +342,30 @@ if args.include_collision:
         select_collision_stmt = "select atom, ion, level_number_upper, level_number_lower, c_ul_conversion, %s" \
                                 " from collision_data"
 
+
+
+
+        select_collision_stmt = "select collision_data.atom, collision_data.ion, collision_data.level_number_upper, collision_data.level_number_lower, c_ul_conversion, %s from collision_data"
+        select_collision_stmt += " JOIN lines ON collision_data.atom = lines.atom AND collision_data.atom = lines.atom " \
+                                 "AND collision_data.level_number_lower = lines.level_id_lower AND " \
+                                 "collision_data.level_number_upper = lines.level_id_upper"
+
+        where_stmt = ['lines.loggf > %s' % args.loggf_threshold]
+        where_stmt.append('lines.atom <= %d' % args.max_atomic_number)
+        if ion_filter_stmt != '':
+            where_stmt.append(ion_filter_stmt)
+        if atom_filter_stmt != '':
+            where_stmt.append(atom_filter_stmt)
+
+
+        if where_stmt != []:
+            select_collision_stmt += ' where %s' % ' and '.join(where_stmt)
+
+
+
         select_collision_stmt = select_collision_stmt % (', '.join(temperature_columns))
+
+        print(select_collision_stmt)
 
         collision_data_dtype = [('atomic_number', np.int), ('ion_number', np.int), ('level_number_upper', np.int),
                                 ('level_number_lower', np.int), ('c_ul_conversion', np.float)]

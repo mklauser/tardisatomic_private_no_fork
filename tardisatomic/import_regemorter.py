@@ -22,6 +22,9 @@ def add_regemorter(conn, atomic_number):
 
         c_lu = compute_van_regemorter(T, f_lu, nu)
         C_ul_conversion = g_upper / float(g_lower)
+        #Delete old
+        delete_stmt = 'DELETE FROM collision_data WHERE atom=? AND ion=? AND level_number_lower = ? AND level_number_upper=?'
+        curs.execute(delete_stmt,(str(atom),str(ion),str(level_number_lower), str(level_number_upper)))
 
         #Build T insert
         insert_stmt = 'insert into collision_data(atom, ion, level_number_lower, level_number_upper, %s, c_ul_conversion)' \
@@ -30,12 +33,15 @@ def add_regemorter(conn, atomic_number):
                         'level_number_lower=%d AND level_number_upper=%d)'%(atom, ion, level_number_lower, level_number_upper)
 
 
-
+        c_lu = [float(i) for i in c_lu]
         collision_data = [atom, ion, level_number_lower, level_number_upper] + c_lu + [C_ul_conversion]
         values_str = ','.join([str(i) for i in collision_data])
         T_str = ', '.join(['t%06d' % item for item in T])
         insert_stmt = insert_stmt%(T_str,values_str)
-        curs.execute(insert_stmt, collision_data)
+        curs.execute(insert_stmt)
+
+    curs.close()
+    conn.commit()
 
 
 
