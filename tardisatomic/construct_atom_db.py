@@ -2,11 +2,18 @@ import os
 import sqlite3
 import math
 import numpy as np
-import macro_atom_transition
-from tardisatomic import import_ionDB
-
+#import macro_atom_transition
+from tardisatomic import import_ionDB, fileio, util, sql_stmts
+from astropy import constants
 gfall_db = os.path.join(os.path.dirname(__file__), 'data', 'gfall.db3')
 zeta_datafile = os.path.join(os.path.dirname(__file__), 'data', 'knox_long_recombination_zeta.dat')
+
+
+def convert_air2vacuum(wavelength):
+    if wavelength > 2000.:
+        return util.convert_air_to_vacuum(wavelength)
+    else:
+        return wavelength
 
 try:
     import sqlparse
@@ -17,60 +24,7 @@ except ImportError:
 
 #constants
 
-hc = 4.135667516e-15 * 2.99792458e10 # 2 ev
-
-
-linelist_select_stmt = """
-SELECT
-    10*wl,
-    loggf,
-    elem AS atom,
-    ion,
-    e_upper * %(hc).20f,
-    cast(2*j_upper + 1 AS integer) AS g_upper,
-    label_upper,
-    e_lower * %(hc).20f,
-    cast(2*j_lower + 1 AS integer) AS g_lower,
-    label_lower
-FROM
-    kurucz_lines.gfall
-"""
-
-linelist_insert_stmt = """
-insert into
-    main.lines(wl,
-        loggf,
-        atom,
-        ion,
-        e_upper,
-        g_upper,
-        label_upper,
-        e_lower,
-        g_lower,
-        label_lower)"""
-        
-        
-linelist_create_stmt = """
-CREATE TABLE
-    main.lines(
-    id integer primary key,
-    wl float,
-    loggf float,
-    atom integer,
-    ion integer,
-    e_upper float,
-    g_upper integer,
-    label_upper text,
-    level_id_upper integer default -1,
-    global_level_id_upper integer default -1,
-    f_ul float,
-    e_lower float,
-    g_lower integer,
-    label_lower text,
-    level_id_lower integer default -1,
-    global_level_id_lower integer default -1,
-    f_lu float)
-    """
+hc = (constants.h * constants.c).to('eV cm').value
 
 update_oscillator_stmt = """
 UPDATE
@@ -85,18 +39,19 @@ def new_linelist_from_gfall(new_dbname, gfall_fname=None, select_atom=None):
     print "Reading lines from Kurucz gfall"
     conn = sqlite3.connect(new_dbname)
     conn.create_function('pow', 2, math.pow)
+    conn.create_function('convert_air2vacuum', 1, convert_air2vacuum)
     if gfall_fname is None:
         gfall_fname = gfall_db
     #attaching gfall database
     conn.execute("attach '%s' as kurucz_lines" % gfall_fname)
     curs = conn.cursor()
     curs.execute('drop table if exists lines')
-    curs.execute(linelist_create_stmt)
+    curs.execute(sql_stmts.linelist_create_stmt)
     if select_atom is None:
         elem_select_stmt = ""
     else:
         elem_select_stmt = " and elem in (%s)" % (','.join(map(str, select_atom)),)
-    insert_fromgfall_stmt = linelist_insert_stmt + linelist_select_stmt % {'hc':hc, 'where_stmt':elem_select_stmt}
+    insert_fromgfall_stmt = sql_stmts.linelist_insert_stmt + sql_stmts.linelist_select_stmt % {'hc':hc, 'where_stmt':elem_select_stmt}
     
     if sqlparse_available:
         print sqlparse.format(insert_fromgfall_stmt, reindent=True)
@@ -124,7 +79,8 @@ CREATE TABLE
         g integer,
         label text,
         level_id integer,
-        metastable bool default NULL)"""
+        metastable bool default NULL,
+        source text)"""
 
 
 level_select_stmt= """
@@ -152,25 +108,35 @@ FROM
     ORDER BY atom, ion, energy
     """
 
-def add_fully_ionized_levels(conn):
+def add_artificial_ionized_levels(conn):
     #Clean first
-    print "Adding fully ionized levels for H and He"
+
+    ionized_levels_stmt = "INSERT INTO levels (atom, ion, energy, g, metastable, level_id, source) " \
+                          "values(?, ?, ?, ?, ?, ?, ?)"
+
+
     clean_fully_ionized_stmt = "DELETE FROM levels WHERE atom == ion "
+
     conn.execute(clean_fully_ionized_stmt)
 
-    add_full_ionized_levels_stmt ="""
-INSERT INTO
-    levels (atom,ion,energy,g,metastable,level_id)
-    SELECT DISTINCT
-        atom,atom,0,1,1,0
-    FROM
-        levels
-    WHERE NOT EXISTS
-        (SELECT 1 FROM levels WHERE atom == ion)
-    AND
-        atom in (1, 2)
-    """
-    conn.execute(add_full_ionized_levels_stmt)
+    ionization_data = fileio.read_nist_ionization_data(full_information=True)
+    for atomic_number, ion_number, level_g, energy in ionization_data[['atomic_number', 'ion_number', 'ground_level_g',
+                                                                      'energy']]:
+        atomic_number = int(atomic_number)
+        ion_number = int(ion_number) - 1
+        if ion_number + 1 == atomic_number:
+            print "Adding fully ionized for atom %d" % atomic_number
+            conn.execute(ionized_levels_stmt, (atomic_number, atomic_number, 0.0, 1.0, True, 0,
+                                               'tardis_artificial_fully_ionized'))
+
+        no_levels = conn.execute('select count(atom) from levels where atom=? and ion=?', (atomic_number, ion_number))\
+                                .fetchone()[0]
+        if no_levels > 0:
+            continue
+        print "Atom %d Ion %d has 0 levels adding artificial level" % (atomic_number, ion_number)
+        conn.execute(ionized_levels_stmt, (atomic_number, ion_number, 0.0, level_g, True, 0,
+                                           'tardis_artificial_missing_ion'))
+
     conn.commit()
 
 
@@ -192,10 +158,10 @@ def create_levels(conn):
             old_atom = atom
             old_ion = ion
             i=0
-        conn.execute('insert into levels(atom, ion, energy, g, label, level_id) values(?, ?, ?, ?, ?, ?)', (atom, ion, energy, g , label, i)) 
+        conn.execute('insert into levels(atom, ion, energy, g, label, level_id, source) values(?, ?, ?, ?, ?, ?, "kurucz")', (atom, ion, energy, g , label, i))
     conn.execute('create index level_unique_idx on levels(atom, ion, energy, g, label)')
     conn.execute('create index level_global_idx on levels(id)')
-    print('Creating fully ionized levels')
+
     return conn
 
 def link_levels(conn):

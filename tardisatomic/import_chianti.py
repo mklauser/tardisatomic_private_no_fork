@@ -16,7 +16,7 @@ basic_atom_data = h5py.File(os.path.join(os.path.dirname(__file__), 'data', 'ato
 symbol2z = dict(zip(basic_atom_data['symbol'], basic_atom_data['atomic_number']))
 
 def read_chianti(symbol, ion_number, level_observed=True, temperatures = np.linspace(2000, 50000, 20)):
-    ion_data = ch.ion('%s_%d' % (symbol.lower(), ion_number))
+    ion_data = ch.ion('{0}_{1:d}'.format(symbol.lower(), ion_number+1))
     levels_data = {}
     levels_data['level_number'] = ion_data.Elvlc['lvl']
 
@@ -26,6 +26,9 @@ def read_chianti(symbol, ion_number, level_observed=True, temperatures = np.lins
     else:
         levels_data['energy'] = units.Unit('cm').to('eV', 1 / np.array(ion_data.Elvlc['ecmth']), units.spectral())
     levels_data['g'] = 2*np.array(ion_data.Elvlc['j']) + 1
+
+    if levels_data['energy'][0] != 0.0:
+        raise ValueError('Level 0 energy is not 0.0')
 
     levels_data = pd.DataFrame(levels_data)
     levels_data.set_index('level_number', inplace=True)
@@ -50,16 +53,18 @@ def read_chianti(symbol, ion_number, level_observed=True, temperatures = np.lins
     lines_data['f_ul'] = lines_data['A_ul'] / A_coeff
     lines_data['f_lu'] = (lines_data['A_ul'] * g_upper) / (A_coeff * g_lower)
     lines_data['loggf'] = np.log10(lines_data['f_lu'] * g_lower)
-    lines_data['wavelength'] = lines_data['wavelength'] / (1.0 + 2.735182E-4 + 131.4182 / lines_data['wavelength']**2
-                                                           + 2.76249E8 / lines_data['wavelength']**4)
+    lines_data['wavelength'] = lines_data['wavelength']# / (1.0 + 2.735182E-4 + 131.4182 / lines_data['wavelength']**2
+                                                       #   + 2.76249E8 / lines_data['wavelength']**4)
 
     lines_data = lines_data[lines_data['level_number_upper'] <= last_bound_level]
     collision_data_index = pd.MultiIndex.from_arrays((ion_data.Splups['lvl1'], ion_data.Splups['lvl2']))
 
     c_lvl1 = []
     c_lvl2 = []
-    c_lower_uppers = []
-    conversion_factors = []
+    c_upper_lowers = []
+
+    g_ratios = []
+    delta_es = []
 
 
     for i, (lvl1, lvl2) in enumerate(zip(ion_data.Splups['lvl1'], ion_data.Splups['lvl2'])):
@@ -68,20 +73,27 @@ def read_chianti(symbol, ion_number, level_observed=True, temperatures = np.lins
 
         c_lvl1.append(lvl1)
         c_lvl2.append(lvl2)
-        c_lower_upper, conversion_factor = calculate_collisional_strength(ion_data.Splups, i, temperatures, levels_data)
-        c_lower_uppers.append(c_lower_upper)
-        conversion_factors.append(conversion_factor)
+        c_upper_lower, g_ratio, delta_e = calculate_collisional_strength(ion_data.Splups, i, temperatures, levels_data)
+        c_upper_lowers.append(c_upper_lower)
+        g_ratios.append(g_ratio)
+        delta_es.append(delta_e)
 
-    c_lower_uppers = np.array(c_lower_uppers)
-    conversion_factors = np.array(conversion_factors)
+    c_upper_lowers = np.array(c_upper_lowers)
+    g_ratios = np.array(g_ratios)
+    delta_es = np.array(delta_es)
 
-    collision_data = pd.DataFrame(c_lower_uppers, index=collision_data_index)
-    collision_data['C_ul_conversion'] = conversion_factors
+
+    collision_data = pd.DataFrame(c_upper_lowers, index=collision_data_index)
+    collision_data['g_ratio'] = g_ratios
+
+    #CAREFUL!!! delta_e has already been divided by k!!
+    collision_data['delta_e'] = delta_es
+
 
     collision_data['level_number_lower'] = c_lvl1
     collision_data['level_number_upper'] = c_lvl2
 
-
+    lines_data = lines_data[lines_data.wavelength>0]
 
     return levels_data, lines_data, collision_data
 
@@ -109,7 +121,7 @@ def calculate_collisional_strength(splups_data, splups_idx, temperature, level_d
     spline_tck = interpolate.splrep(x_knots, y_knots)
 
     if ttype == 1:
-        x = 1 - np.log(c) / (kt/delta_E + c)
+        x = 1 - np.log(c) / np.log(kt/delta_E + c)
         y_func = interpolate.splev(x, spline_tck)
         upsilon = y_func * np.log(kt/delta_E + np.exp(1))
 
@@ -124,18 +136,21 @@ def calculate_collisional_strength(splups_data, splups_idx, temperature, level_d
         upsilon = y_func / (kt/delta_E + 1)
 
     elif ttype == 4:
-        x = 1 - np.log(c) / (kt/delta_E + c)
+        x = 1 - np.log(c) / np.log(kt/delta_E + c)
         y_func = interpolate.splev(x, spline_tck)
         upsilon = y_func * np.log(kt/delta_E + c)
 
     elif ttype == 5:
         raise ValueError('Not sure what to do with ttype=5')
 
-    #### REFERENCE MISSING #####
-    c_lower_upper = 8.63e-6 * upsilon * np.exp(-delta_E/kt) / (g_lower * temperature**.5)
-    conversion_factor = g_upper / float(g_lower)
+    #### 1992A&A...254..436B Equation 20 & 22 #####
 
-    return c_lower_upper, conversion_factor
+    c_upper_lower = 8.63e-6 * upsilon  / (g_upper * temperature**.5)
+    g_ratio = float(g_upper) / float(g_lower)
+    delta_Ek = delta_E / kb_ev
+
+
+    return c_upper_lower, g_ratio, delta_Ek
 
 
 def insert_to_db(symbol, ion_number, conn, temperatures=None):
@@ -146,8 +161,8 @@ def insert_to_db(symbol, ion_number, conn, temperatures=None):
     curs = conn.cursor()
 
 
-    curs.execute('delete from levels where atom=? and ion=?', (atomic_number, ion_number - 1))
-    curs.execute('delete from lines where atom=? and ion=?', (atomic_number, ion_number - 1))
+    curs.execute('delete from levels where atom=? and ion=?', (atomic_number, ion_number))
+    curs.execute('delete from lines where atom=? and ion=?', (atomic_number, ion_number))
 
 
     collision_data_cols = curs.execute('pragma table_info(collision_data)').fetchall()
@@ -166,34 +181,35 @@ def insert_to_db(symbol, ion_number, conn, temperatures=None):
     levels_data, lines_data, collision_data = read_chianti(symbol, ion_number, temperatures=temperatures_data)
 
     for key, line in lines_data.iterrows():
-        curs.execute('insert into lines(wl, atom, ion, level_id_upper, level_id_lower, f_lu, f_ul, loggf) '
-                     'values(?, ?, ?, ?, ?, ?, ?, ?)',
-                     (line['wavelength'], atomic_number, ion_number-1,
+        curs.execute('insert into lines(wavelength, atom, ion, level_id_upper, level_id_lower, f_lu, f_ul, loggf, source) '
+                     'values(?, ?, ?, ?, ?, ?, ?, ?, "chianti")',
+                     (line['wavelength'], atomic_number, ion_number,
                       line['level_number_upper']-1, line['level_number_lower']-1,
                       line['f_lu'], line['f_ul'], line['loggf']))
 
 
     for key, level in levels_data.iterrows():
         count_down = curs.execute('select count(id) from lines where atom=? and ion=? and level_id_upper=?',
-                     (atomic_number, ion_number-1, int(key-1))).fetchone()[0]
+                     (atomic_number, ion_number, int(key-1))).fetchone()[0]
 
-        curs.execute('insert into levels(atom, ion, energy, g, level_id, metastable) values(?, ?, ?, ?, ?, ?)',
-                     (atomic_number, ion_number-1, level['energy'], level['g'], int(key-1), count_down == 0))
-
-
+        curs.execute('insert into levels(atom, ion, energy, g, level_id, metastable, source) values(?, ?, ?, ?, ?, ?, "chianti")',
+                     (atomic_number, ion_number, level['energy'], level['g'], int(key-1), count_down == 0))
 
 
-    insert_stmt = 'insert into collision_data(atom, ion, level_number_lower, level_number_upper, %s, c_ul_conversion) values(%s)'
 
-    insert_stmt = insert_stmt % (', '.join(['t%06d' % item for item in temperatures_data]), ','.join('?' * (len(temperatures_data ) + 5)))
+
+    insert_stmt = 'insert into collision_data(source, atom, ion, level_number_lower, level_number_upper, %s, g_ratio, delta_e) values(%s)'
+
+    insert_stmt = insert_stmt % (', '.join(['t%06d' % item for item in temperatures_data]), ','.join('?' * (len(temperatures_data ) + 7)))
 
     for (level_number_lower, level_number_upper), collision_data in collision_data.iterrows():
-        c_lu =  list(collision_data[:len(temperatures_data)].values)
-        C_ul_conversion = collision_data[-3]
-        level_number_lower = collision_data[-2] - 1
-        level_number_upper = collision_data[-1] - 1
+        c_ul =  list(collision_data[:len(temperatures_data)].values)
+        g_ratio = collision_data['g_ratio']
+        delta_e = collision_data['delta_e']
+        level_number_lower = int(collision_data['level_number_lower'] - 1)
+        level_number_upper = int(collision_data['level_number_upper'] - 1)
 
-        collision_line_data = [atomic_number, ion_number-1, level_number_lower, level_number_upper] + c_lu + [C_ul_conversion]
+        collision_line_data = ["chianti", atomic_number, ion_number, level_number_lower, level_number_upper] + c_ul + [g_ratio, delta_e]
 
 
         curs.execute(insert_stmt, collision_line_data)
@@ -214,11 +230,13 @@ def create_collision_data_table(conn, temperatures=np.arange(2000, 50000, 2000))
 
 
     collision_data_table_stmt = """create table collision_data(id integer primary key,
+                                                source text,
                                                 atom integer,
                                                 ion integer,
                                                 level_number_upper integer,
                                                 level_number_lower integer,
-                                                c_ul_conversion float,
+                                                g_ratio float,
+                                                delta_e float,
                                                 %s)
                                                 """
     temperatures = temperatures.astype(np.int64)
